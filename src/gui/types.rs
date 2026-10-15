@@ -30,6 +30,50 @@ pub struct WizardConfig {
     pub title: String,
     pub pages: Vec<ConfiguredPage>,
     pub buttons: ButtonLabels,
+    /// Client size of the window in logical pixels, `None` for the default.
+    pub size: Option<(i32, i32)>,
+}
+
+/// What an install page knows about the running install, handed to a
+/// [`CanvasFrame`] on every frame.
+#[derive(Debug, Clone, Default)]
+pub struct InstallProgress {
+    /// The latest status line.
+    pub status: String,
+    /// Overall step progress in `[0.0, 1.0]`.
+    pub fraction: f64,
+    /// Bytes of external files installed so far.
+    pub bytes_done: u64,
+    /// Bytes of external files expected in total, 0 when there are none.
+    pub bytes_total: u64,
+}
+
+/// One frame of an animated install page, see
+/// [`PageHandle::canvas`](crate::gui::PageHandle::canvas).
+pub struct CanvasFrame<'a> {
+    /// RGBA pixels, premultiplied alpha, rows top to bottom, `width * 4` bytes per row.
+    pub pixels: &'a mut [u8],
+    /// Width in physical pixels.
+    pub width: u32,
+    /// Height in physical pixels.
+    pub height: u32,
+    /// Physical pixels per logical pixel (1.0 at 96 DPI).
+    pub scale: f32,
+    /// Time since the page was first drawn.
+    pub elapsed: std::time::Duration,
+    /// The state of the install.
+    pub progress: &'a InstallProgress,
+}
+
+/// Draws one frame of an animated install page.
+#[doc(hidden)]
+pub type CanvasDraw = Box<dyn FnMut(&mut CanvasFrame<'_>) + 'static>;
+
+/// An animated drawing that replaces the controls of an install page.
+#[doc(hidden)]
+pub struct Canvas {
+    pub frames_per_second: u32,
+    pub draw: CanvasDraw,
 }
 
 /// A wizard page with optional navigation callbacks.
@@ -117,6 +161,9 @@ pub enum WizardPage {
         /// only the status label and progress bar are shown. Toggle via
         /// [`crate::gui::PageHandle::hide_log`].
         show_log: bool,
+        /// Drawn instead of the status label, progress bar and log when set.
+        /// Set via [`crate::gui::PageHandle::canvas`].
+        canvas: Option<Canvas>,
     },
     Finish {
         title: String,
@@ -337,6 +384,7 @@ impl CustomPageBuilder {
 pub(crate) enum GuiMessage {
     SetStatus(String),
     SetProgress(f64),
+    SetBytes(u64, u64),
     Log(String),
     Finished(Result<()>),
 }
@@ -362,5 +410,8 @@ impl crate::ProgressSink for ChannelSink {
     }
     fn log(&self, message: &str) {
         let _ = self.tx.send(GuiMessage::Log(message.to_string()));
+    }
+    fn set_bytes(&self, done: u64, total: u64) {
+        let _ = self.tx.send(GuiMessage::SetBytes(done, total));
     }
 }

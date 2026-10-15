@@ -507,6 +507,8 @@ pub(crate) fn run(
                             ip.set_progress(p);
                         }
                     }
+                    // GTK shows the step progress bar only
+                    Ok(GuiMessage::SetBytes(..)) => {}
                     Ok(GuiMessage::Log(msg)) => {
                         let pages_b = pages_c.borrow();
                         let idx = *current_c.borrow();

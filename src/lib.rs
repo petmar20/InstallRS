@@ -69,6 +69,7 @@ pub mod gui;
 mod cmdline;
 mod component;
 mod embedded;
+mod external;
 mod ops;
 mod options;
 mod progress;
@@ -84,7 +85,7 @@ mod types;
 pub use component::Component;
 pub use ops::{DirOp, FileOp, MkdirOp, RemoveOp, UninstallerOp};
 pub use options::{FromOptionValue, OptionKind, OptionValue};
-pub use progress::{ProgressSink, StderrProgressSink};
+pub use progress::{format_bytes, ProgressSink, StderrProgressSink};
 #[cfg(target_os = "windows")]
 #[cfg_attr(docsrs, doc(cfg(target_os = "windows")))]
 pub use registry::{RegDeleteKey, RegDeleteValue, RegSetValue, Registry, RegistryHive};
@@ -102,8 +103,9 @@ pub use types::{CancellationToken, DirErrorHandler, DirFilter, ErrorAction, Over
 pub mod __private {
     pub use crate::embedded::{
         assert_entries_version, verify_payload, DirChild, DirChildKind, EmbeddedEntry,
-        ENTRIES_VERSION,
+        ExternalFile, ENTRIES_VERSION,
     };
+    pub use crate::external::{DATA_HEADER_LEN, DATA_MAGIC};
     pub use crate::source::source_path_hash_const;
 }
 
@@ -145,6 +147,9 @@ pub struct Installer {
     options: Vec<CmdOption>,
     option_values: std::collections::HashMap<String, OptionValue>,
     log_file: Option<Mutex<std::fs::File>>,
+    external_data: Option<external::ExternalData>,
+    /// Bytes of external files installed so far, and the expected total.
+    bytes: Mutex<(u64, u64)>,
 }
 
 impl std::fmt::Debug for Installer {
@@ -191,6 +196,8 @@ impl Installer {
             options: Vec::new(),
             option_values: std::collections::HashMap::new(),
             log_file: None,
+            external_data: None,
+            bytes: Mutex::new((0, 0)),
         }
     }
 
@@ -562,6 +569,8 @@ impl Installer {
                     .context("LZMA decompression failed")?;
                 Ok(out)
             }
+            #[cfg(feature = "zstd")]
+            "zstd" => zstd::decode_all(data).context("zstd decompression failed"),
             #[cfg(feature = "gzip")]
             "gzip" => {
                 let mut decoder = flate2::read::GzDecoder::new(data);
@@ -1155,7 +1164,7 @@ mod tests {
 
     #[test]
     fn decompress_unknown_method_errors() {
-        let err = Installer::decompress(b"data", "zstd").unwrap_err();
+        let err = Installer::decompress(b"data", "brotli").unwrap_err();
         assert!(err.to_string().contains("unsupported compression"));
     }
 

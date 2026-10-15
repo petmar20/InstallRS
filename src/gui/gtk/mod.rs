@@ -74,12 +74,14 @@ pub(crate) fn run_wizard(config: WizardConfig, installer: &mut Installer) -> Res
                 callback,
                 is_uninstall,
                 show_log,
+                canvas,
             } => {
                 install_callback = Some(callback);
                 WizardPage::Install {
                     callback: Box::new(|_| Ok(())),
                     is_uninstall,
                     show_log,
+                    canvas,
                 }
             }
             other => other,
@@ -96,6 +98,7 @@ pub(crate) fn run_wizard(config: WizardConfig, installer: &mut Installer) -> Res
         title: config.title,
         pages: pages_without_callback,
         buttons: config.buttons,
+        size: config.size,
     };
 
     let result = window::run(

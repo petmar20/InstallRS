@@ -15,7 +15,7 @@ use anyhow::{anyhow, Result};
 /// [`DirChildKind`], or the static-table layout changes in a way
 /// that breaks generated code from earlier CLIs.
 #[doc(hidden)]
-pub const ENTRIES_VERSION: u32 = 1;
+pub const ENTRIES_VERSION: u32 = 2;
 
 /// Compile-time check that the runtime's `ENTRIES_VERSION` matches
 /// what the generating CLI expected. Called from generated `main.rs`
@@ -68,6 +68,25 @@ pub enum EmbeddedEntry {
         source_path_hash: u64,
         children: &'static [DirChild],
     },
+    /// A file stored in the data file next to the installer, from
+    /// `source!("path", external = true)`.
+    External {
+        source_path_hash: u64,
+        file: ExternalFile,
+    },
+}
+
+/// Where a file lives in the data file next to the installer.
+#[doc(hidden)]
+pub struct ExternalFile {
+    /// Byte offset of the stored (possibly compressed) bytes.
+    pub offset: u64,
+    pub stored_size: u64,
+    /// Size of the installed file.
+    pub size: u64,
+    pub compression: &'static str,
+    /// SHA-256 of the stored bytes, checked while installing.
+    pub sha256: [u8; 32],
 }
 
 /// A named child inside an [`EmbeddedEntry::Dir`] tree.
@@ -87,4 +106,5 @@ pub enum DirChildKind {
     Dir {
         children: &'static [DirChild],
     },
+    External(ExternalFile),
 }

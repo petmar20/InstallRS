@@ -1,8 +1,13 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use winsafe::co;
 use winsafe::guard::DeleteObjectGuard;
 use winsafe::gui;
 use winsafe::msg::{lvm, wm};
 use winsafe::prelude::*;
+
+use crate::gui::types::{Canvas, CanvasFrame, InstallProgress};
 use winsafe::{HBRUSH, HFONT, LVHITTESTINFO, LVITEM, SIZE, TRACKMOUSEEVENT};
 
 /// Internal padding between the panel edge and its controls.
@@ -587,13 +592,29 @@ fn get_lv_check(list: &gui::ListView, index: u32) -> bool {
 // ── Install Page ────────────────────────────────────────────────────────────
 
 pub struct InstallPage {
-    status_label: gui::Label,
-    progress_bar: gui::ProgressBar,
+    status_label: Option<gui::Label>,
+    progress_bar: Option<gui::ProgressBar>,
     log_edit: Option<gui::Edit>,
+    canvas: Option<CanvasView>,
 }
 
 impl InstallPage {
-    pub fn new(parent: &gui::WindowControl, width: i32, height: i32, show_log: bool) -> Self {
+    pub fn new(
+        parent: &gui::WindowControl,
+        width: i32,
+        height: i32,
+        show_log: bool,
+        canvas: Option<Canvas>,
+    ) -> Self {
+        if let Some(canvas) = canvas {
+            return Self {
+                status_label: None,
+                progress_bar: None,
+                log_edit: None,
+                canvas: Some(CanvasView::new(parent, width, height, canvas)),
+            };
+        }
+
         let status_label = gui::Label::new(
             parent,
             gui::LabelOpts {
@@ -639,19 +660,38 @@ impl InstallPage {
         setup_transparent_labels(parent);
 
         Self {
-            status_label,
-            progress_bar,
+            status_label: Some(status_label),
+            progress_bar: Some(progress_bar),
             log_edit,
+            canvas: None,
         }
     }
 
     pub fn set_status(&self, status: &str) {
-        let _ = self.status_label.hwnd().SetWindowText(status);
+        if let Some(label) = self.status_label.as_ref() {
+            let _ = label.hwnd().SetWindowText(status);
+        }
+        if let Some(canvas) = self.canvas.as_ref() {
+            canvas.state.borrow_mut().progress.status = status.to_string();
+        }
     }
 
     pub fn set_progress(&self, progress: f64) {
-        let pos = (progress.clamp(0.0, 1.0) * 100.0) as u32;
-        self.progress_bar.set_position(pos);
+        if let Some(bar) = self.progress_bar.as_ref() {
+            let pos = (progress.clamp(0.0, 1.0) * 100.0) as u32;
+            bar.set_position(pos);
+        }
+        if let Some(canvas) = self.canvas.as_ref() {
+            canvas.state.borrow_mut().progress.fraction = progress.clamp(0.0, 1.0);
+        }
+    }
+
+    pub fn set_bytes(&self, done: u64, total: u64) {
+        if let Some(canvas) = self.canvas.as_ref() {
+            let mut state = canvas.state.borrow_mut();
+            state.progress.bytes_done = done;
+            state.progress.bytes_total = total;
+        }
     }
 
     pub fn append_log(&self, message: &str) {
@@ -665,6 +705,122 @@ impl InstallPage {
             format!("{current}\r\n{message}")
         };
         let _ = edit.set_text(&new_text);
+    }
+}
+
+const CANVAS_TIMER_ID: usize = 1;
+
+struct CanvasState {
+    canvas: Canvas,
+    progress: InstallProgress,
+    started: Option<std::time::Instant>,
+    pixels: Vec<u8>,
+}
+
+/// A child window that repaints itself from the page's [`Canvas`] on a timer.
+struct CanvasView {
+    state: Rc<RefCell<CanvasState>>,
+}
+
+impl CanvasView {
+    fn new(parent: &gui::WindowControl, width: i32, height: i32, canvas: Canvas) -> Self {
+        let interval = (1000 / canvas.frames_per_second).max(1);
+        let state = Rc::new(RefCell::new(CanvasState {
+            canvas,
+            progress: InstallProgress::default(),
+            started: None,
+            pixels: Vec::new(),
+        }));
+        let control = gui::WindowControl::new(
+            parent,
+            gui::WindowControlOpts {
+                position: gui::dpi(0, 0),
+                size: gui::dpi(width, height),
+                style: co::WS::CHILD | co::WS::VISIBLE | co::WS::CLIPSIBLINGS,
+                resize_behavior: (gui::Horz::Resize, gui::Vert::Resize),
+                ..Default::default()
+            },
+        );
+
+        let control_c = control.clone();
+        control.on().wm_create(move |_| {
+            control_c.hwnd().SetTimer(CANVAS_TIMER_ID, interval, None)?;
+            Ok(0)
+        });
+
+        let control_c = control.clone();
+        control.on().wm_timer(CANVAS_TIMER_ID, move || {
+            if control_c.hwnd().IsWindowVisible() {
+                control_c.hwnd().InvalidateRect(None, false)?;
+            }
+            Ok(())
+        });
+
+        // every pixel is painted each frame, erasing first would flicker
+        control.on().wm_erase_bkgnd(|_| Ok(1));
+
+        let control_c = control.clone();
+        let state_c = state.clone();
+        control.on().wm_paint(move || {
+            let hwnd = control_c.hwnd();
+            let hdc = hwnd.BeginPaint()?;
+            let rect = hwnd.GetClientRect()?;
+            let width = rect.right - rect.left;
+            let height = rect.bottom - rect.top;
+            if width <= 0 || height <= 0 {
+                return Ok(());
+            }
+
+            let mut guard = state_c.borrow_mut();
+            let state = &mut *guard;
+            let started = *state.started.get_or_insert_with(std::time::Instant::now);
+            state.pixels.clear();
+            state.pixels.resize(width as usize * height as usize * 4, 0);
+            let mut frame = CanvasFrame {
+                pixels: &mut state.pixels,
+                width: width as u32,
+                height: height as u32,
+                scale: gui::dpi(1000, 0).0 as f32 / 1000.0,
+                elapsed: started.elapsed(),
+                progress: &state.progress,
+            };
+            (state.canvas.draw)(&mut frame);
+
+            // GDI wants blue, green, red
+            for pixel in state.pixels.as_chunks_mut::<4>().0 {
+                pixel.swap(0, 2);
+            }
+            let mut info = winsafe::BITMAPINFO::default();
+            info.bmiHeader.biWidth = width;
+            info.bmiHeader.biHeight = -height;
+            info.bmiHeader.biPlanes = 1;
+            info.bmiHeader.biBitCount = 32;
+            info.bmiHeader.biCompression = co::BI::RGB;
+            let bitmap = hdc.CreateCompatibleBitmap(width, height)?;
+            hdc.SetDIBits(
+                &bitmap,
+                0,
+                height as u32,
+                &state.pixels,
+                &info,
+                co::DIB::RGB_COLORS,
+            )?;
+            let memory = hdc.CreateCompatibleDC()?;
+            let _selected = memory.SelectObject(&*bitmap)?;
+            hdc.BitBlt(
+                winsafe::POINT { x: 0, y: 0 },
+                winsafe::SIZE {
+                    cx: width,
+                    cy: height,
+                },
+                &memory,
+                winsafe::POINT { x: 0, y: 0 },
+                co::ROP::SRCCOPY,
+            )?;
+            Ok(())
+        });
+
+        Self { state }
     }
 }
 

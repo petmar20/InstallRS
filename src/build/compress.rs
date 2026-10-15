@@ -27,6 +27,8 @@ pub fn compress(data: &[u8], method: &str) -> Result<Vec<u8>> {
             encoder.write_all(data).context("bzip2 write failed")?;
             encoder.finish().context("bzip2 finish failed")
         }
+        #[cfg(feature = "zstd")]
+        "zstd" => zstd::bulk::compress(data, 19).context("zstd compression failed"),
         other => Err(anyhow!("unsupported compression method: {other}")),
     }
 }
@@ -59,6 +61,8 @@ pub fn decompress(data: &[u8], method: &str) -> Result<Vec<u8>> {
                 .context("bzip2 decompression failed")?;
             Ok(out)
         }
+        #[cfg(feature = "zstd")]
+        "zstd" => zstd::decode_all(data).context("zstd decompression failed"),
         other => Err(anyhow!("unsupported compression method: {other}")),
     }
 }
@@ -71,9 +75,11 @@ pub fn validate_method(method: &str) -> Result<()> {
         "gzip" => Ok(()),
         #[cfg(feature = "bzip2")]
         "bzip2" => Ok(()),
+        #[cfg(feature = "zstd")]
+        "zstd" => Ok(()),
         "none" => Ok(()),
         other => Err(anyhow!(
-            "unsupported compression method: {other} (choose lzma, gzip, bzip2, or none)"
+            "unsupported compression method: {other} (choose lzma, gzip, bzip2, zstd, or none)"
         )),
     }
 }

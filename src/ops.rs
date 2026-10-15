@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::embedded::{DirChild, DirChildKind, EmbeddedEntry};
+use crate::embedded::{DirChild, DirChildKind, EmbeddedEntry, ExternalFile};
 use crate::types::{
     DirErrorHandler, DirErrorHandlerRef, DirFilter, DirFilterRef, ErrorAction, OverwriteMode,
 };
@@ -82,20 +82,15 @@ impl<'i> FileOp<'i> {
         self.installer.emit_status(&self.status);
         self.installer.emit_log(&self.log);
 
-        let (raw_bytes, compression) = find_file(self.installer.entries, self.source.0)?;
+        let payload = find_file(self.installer.entries, self.source.0)?;
         let dest = self.installer.resolve_out_path(&self.dst)?;
         let overwrite = self.overwrite;
         let mode = self.mode;
         let weight = self.weight;
+        let installer = &*self.installer;
 
-        self.installer.run_weighted_step(weight, || {
-            if apply_overwrite_policy(&dest, overwrite)? {
-                return Ok(());
-            }
-            let bytes = Installer::decompress(raw_bytes, compression)?;
-            write_file(&dest, &bytes)?;
-            apply_mode(&dest, mode)?;
-            Ok(())
+        installer.run_weighted_step(weight, || {
+            install_one_file(installer, &payload, &dest, overwrite, mode)
         })
     }
 }
@@ -289,20 +284,32 @@ impl<'i> RemoveOp<'i> {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-pub(crate) fn find_file(
-    entries: &'static [EmbeddedEntry],
-    hash: u64,
-) -> Result<(&'static [u8], &'static str)> {
+/// The bytes of a file, inside the installer or in its data file.
+pub(crate) enum Payload<'a> {
+    Embedded {
+        data: &'a [u8],
+        compression: &'a str,
+    },
+    External(&'a ExternalFile),
+}
+
+pub(crate) fn find_file(entries: &'static [EmbeddedEntry], hash: u64) -> Result<Payload<'static>> {
     for entry in entries {
-        if let EmbeddedEntry::File {
-            source_path_hash,
-            data,
-            compression,
-        } = entry
-        {
-            if *source_path_hash == hash {
-                return Ok((data, compression));
+        match entry {
+            EmbeddedEntry::File {
+                source_path_hash,
+                data,
+                compression,
+            } if *source_path_hash == hash => {
+                return Ok(Payload::Embedded { data, compression });
             }
+            EmbeddedEntry::External {
+                source_path_hash,
+                file,
+            } if *source_path_hash == hash => {
+                return Ok(Payload::External(file));
+            }
+            _ => {}
         }
     }
     Err(anyhow!(
@@ -352,14 +359,21 @@ pub(crate) fn install_children(
         };
 
         match &child.kind {
-            DirChildKind::File { data, compression } => {
+            DirChildKind::File { .. } | DirChildKind::External(_) => {
                 if let Some(f) = filter {
                     if !f(&rel) {
                         continue;
                     }
                 }
+                let payload = match &child.kind {
+                    DirChildKind::File { data, compression } => {
+                        Payload::Embedded { data, compression }
+                    }
+                    DirChildKind::External(file) => Payload::External(file),
+                    DirChildKind::Dir { .. } => unreachable!(),
+                };
                 let res = installer.run_weighted_step(weight, || {
-                    install_one_file(data, compression, &target, overwrite, mode)
+                    install_one_file(installer, &payload, &target, overwrite, mode)
                 });
                 if let Err(e) = res {
                     match on_error {
@@ -384,8 +398,8 @@ pub(crate) fn install_children(
 }
 
 fn install_one_file(
-    data: &[u8],
-    compression: &str,
+    installer: &Installer,
+    payload: &Payload<'_>,
     dest: &Path,
     overwrite: OverwriteMode,
     mode: Option<u32>,
@@ -393,8 +407,13 @@ fn install_one_file(
     if apply_overwrite_policy(dest, overwrite)? {
         return Ok(());
     }
-    let bytes = Installer::decompress(data, compression)?;
-    write_file(dest, &bytes)?;
+    match payload {
+        Payload::Embedded { data, compression } => {
+            let bytes = Installer::decompress(data, compression)?;
+            write_file(dest, &bytes)?;
+        }
+        Payload::External(file) => installer.install_external_file(file, dest)?,
+    }
     apply_mode(dest, mode)?;
     Ok(())
 }

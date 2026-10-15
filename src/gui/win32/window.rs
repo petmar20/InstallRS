@@ -95,9 +95,10 @@ pub(crate) fn run(
         }
     };
 
+    let (window_width, window_height) = config.size.unwrap_or((WINDOW_WIDTH, WINDOW_HEIGHT));
     let wnd = gui::WindowMain::new(gui::WindowMainOpts {
         title: &config.title,
-        size: gui::dpi(WINDOW_WIDTH, WINDOW_HEIGHT),
+        size: gui::dpi(window_width, window_height),
         class_icon,
         style: co::WS::CAPTION
             | co::WS::SYSMENU
@@ -111,9 +112,9 @@ pub(crate) fn run(
 
     // Content area dimensions (above the button bar). The panel itself is flush
     // with the top and sides of the window; pages add their own internal padding.
-    let content_width = WINDOW_WIDTH;
+    let content_width = window_width;
     let button_bar_height = BUTTON_HEIGHT + 2 * MARGIN;
-    let content_height = WINDOW_HEIGHT - button_bar_height;
+    let content_height = window_height - button_bar_height;
 
     // Create page panels.
     let mut pages: Vec<Page> = Vec::new();
@@ -193,11 +194,14 @@ pub(crate) fn run(
                     content_height,
                 ))
             }
-            WizardPage::Install { show_log, .. } => PageKind::Install(InstallPage::new(
+            WizardPage::Install {
+                show_log, canvas, ..
+            } => PageKind::Install(InstallPage::new(
                 &panel,
                 content_width,
                 content_height,
                 show_log,
+                canvas,
             )),
             WizardPage::Finish {
                 title,
@@ -245,14 +249,14 @@ pub(crate) fn run(
     }
 
     // Navigation buttons.
-    let btn_y = WINDOW_HEIGHT - BUTTON_HEIGHT - MARGIN;
+    let btn_y = window_height - BUTTON_HEIGHT - MARGIN;
     let (bw, bh) = gui::dpi(BUTTON_WIDTH, BUTTON_HEIGHT);
 
     let btn_back = gui::Button::new(
         &wnd,
         gui::ButtonOpts {
             text: &config.buttons.back,
-            position: gui::dpi(WINDOW_WIDTH - 3 * (BUTTON_WIDTH + MARGIN), btn_y),
+            position: gui::dpi(window_width - 3 * (BUTTON_WIDTH + MARGIN), btn_y),
             width: bw,
             height: bh,
             resize_behavior: (gui::Horz::Repos, gui::Vert::Repos),
@@ -264,7 +268,7 @@ pub(crate) fn run(
         &wnd,
         gui::ButtonOpts {
             text: &config.buttons.next,
-            position: gui::dpi(WINDOW_WIDTH - 2 * (BUTTON_WIDTH + MARGIN), btn_y),
+            position: gui::dpi(window_width - 2 * (BUTTON_WIDTH + MARGIN), btn_y),
             width: bw,
             height: bh,
             resize_behavior: (gui::Horz::Repos, gui::Vert::Repos),
@@ -277,7 +281,7 @@ pub(crate) fn run(
         &wnd,
         gui::ButtonOpts {
             text: &config.buttons.cancel,
-            position: gui::dpi(WINDOW_WIDTH - (BUTTON_WIDTH + MARGIN), btn_y),
+            position: gui::dpi(window_width - (BUTTON_WIDTH + MARGIN), btn_y),
             width: bw,
             height: bh,
             resize_behavior: (gui::Horz::Repos, gui::Vert::Repos),
@@ -563,7 +567,7 @@ pub(crate) fn run(
 
         // Enforce minimum window size (the initial dimensions + non-client area).
         {
-            let (client_w, client_h) = gui::dpi(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let (client_w, client_h) = gui::dpi(window_width, window_height);
             let style = co::WS::CAPTION
                 | co::WS::SYSMENU
                 | co::WS::CLIPCHILDREN
@@ -633,6 +637,13 @@ pub(crate) fn run(
                             let idx = *current_timer.lock().unwrap();
                             if let PageKind::Install(ref ip) = pages_guard[idx].kind {
                                 ip.set_progress(progress);
+                            }
+                        }
+                        Ok(GuiMessage::SetBytes(done, total)) => {
+                            let pages_guard = pages_timer.lock().unwrap();
+                            let idx = *current_timer.lock().unwrap();
+                            if let PageKind::Install(ref ip) = pages_guard[idx].kind {
+                                ip.set_bytes(done, total);
                             }
                         }
                         Ok(GuiMessage::Log(msg)) => {

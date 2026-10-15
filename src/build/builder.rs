@@ -5,6 +5,7 @@ use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
 
 use super::compress;
+use super::external::{DataWriter, ExternalInfo};
 use super::ico_convert;
 use super::scanner;
 
@@ -425,6 +426,14 @@ struct GatheredFile {
     storage_name: String,
     compression: String,
     is_dir: bool,
+    /// Set for files stored in the data file next to the installer.
+    external: Option<ExternalInfo>,
+}
+
+/// The data file of an installer with external files.
+struct ExternalData {
+    file_name: String,
+    id: [u8; 16],
 }
 
 pub fn build(mut params: BuildParams) -> Result<()> {
@@ -508,12 +517,14 @@ pub fn build(mut params: BuildParams) -> Result<()> {
 
     // ── Gather and compress files for installer + uninstaller ────────────────
     let mut hash_cache: HashMap<String, String> = HashMap::new();
+    let mut data_writer: Option<DataWriter> = None;
     let install_gathered = gather_for_phase(
         "install",
         &scan.install_sources,
         &files_dir,
         &params,
         &mut hash_cache,
+        &mut data_writer,
     )?;
     let uninstall_gathered = gather_for_phase(
         "uninstall",
@@ -521,7 +532,16 @@ pub fn build(mut params: BuildParams) -> Result<()> {
         &files_dir,
         &params,
         &mut hash_cache,
+        &mut data_writer,
     )?;
+    let external_data = match data_writer {
+        Some(writer) => {
+            let file_name = writer.file_name();
+            let id = writer.finish()?;
+            Some(ExternalData { file_name, id })
+        }
+        None => None,
+    };
 
     // ── Compile uninstaller ──────────────────────────────────────────────────
     let target_is_windows = params
@@ -639,6 +659,7 @@ pub fn build(mut params: BuildParams) -> Result<()> {
         &files_dir,
         &uninstaller_compressed,
         &params.compression,
+        external_data.as_ref(),
         params.installer_win_resource.as_ref(),
         params.gui_enabled,
         target_is_windows,
@@ -988,6 +1009,7 @@ fn gather_for_phase(
     files_dir: &Path,
     params: &BuildParams,
     hash_cache: &mut HashMap<String, String>,
+    data_writer: &mut Option<DataWriter>,
 ) -> Result<Vec<GatheredFile>> {
     let mut gathered: Vec<GatheredFile> = Vec::new();
     for src in sources {
@@ -1000,6 +1022,29 @@ fn gather_for_phase(
             continue;
         }
         let merged = merge_ignore(&params.ignore_patterns, &src.ignore);
+        if src.external {
+            if phase != "install" {
+                return Err(anyhow!(
+                    "source!({:?}, external = true) can only be used by install",
+                    src.path
+                ));
+            }
+            if data_writer.is_none() {
+                *data_writer = Some(DataWriter::create(
+                    &params.output_file.with_extension("data"),
+                )?);
+            }
+            let writer = data_writer.as_mut().expect("created above");
+            log::info!("Storing {} in the data file", src.path);
+            gather_external(
+                &src.path,
+                &params.target_dir.join(&src.path),
+                &merged,
+                writer,
+                &mut gathered,
+            )?;
+            continue;
+        }
         gather_source(
             &src.path,
             &params.target_dir,
@@ -1129,6 +1174,7 @@ fn gather_file(
         storage_name,
         compression: compression.to_string(),
         is_dir: false,
+        external: None,
     });
     Ok(())
 }
@@ -1164,6 +1210,7 @@ fn gather_dir(
         storage_name: String::new(),
         compression: String::new(),
         is_dir: true,
+        external: None,
     });
 
     for entry in std::fs::read_dir(abs_path)
@@ -1207,6 +1254,62 @@ fn gather_dir(
     Ok(())
 }
 
+/// Store a file, or every file of a directory, in the data file.
+fn gather_external(
+    source_path: &str,
+    abs_path: &Path,
+    ignore: &[String],
+    writer: &mut DataWriter,
+    gathered: &mut Vec<GatheredFile>,
+) -> Result<()> {
+    let source_path = source_path.replace('\\', "/");
+    if gathered.iter().any(|f| f.source_path == source_path) {
+        return Ok(());
+    }
+    let stat = std::fs::metadata(abs_path)
+        .with_context(|| format!("failed to stat: {}", abs_path.display()))?;
+    if !stat.is_dir() {
+        let info = writer.add(abs_path)?;
+        gathered.push(GatheredFile {
+            source_path,
+            storage_name: String::new(),
+            compression: info.compression.to_string(),
+            is_dir: false,
+            external: Some(info),
+        });
+        return Ok(());
+    }
+
+    gathered.push(GatheredFile {
+        source_path: source_path.clone(),
+        storage_name: String::new(),
+        compression: String::new(),
+        is_dir: true,
+        external: None,
+    });
+    let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(abs_path)
+        .with_context(|| format!("failed to read dir: {}", abs_path.display()))?
+        .collect::<std::io::Result<_>>()
+        .context("failed to read directory entry")?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if matches_ignore(&name, ignore) {
+            log::debug!("Ignoring: {name}");
+            continue;
+        }
+        gather_external(
+            &format!("{source_path}/{name}"),
+            &entry.path(),
+            ignore,
+            writer,
+            gathered,
+        )?;
+    }
+    Ok(())
+}
+
 fn matches_ignore(name: &str, patterns: &[String]) -> bool {
     patterns.iter().any(|p| {
         glob::Pattern::new(p)
@@ -1242,6 +1345,7 @@ fn compression_feature(method: &str) -> Option<&str> {
         "lzma" => Some("lzma"),
         "gzip" => Some("gzip"),
         "bzip2" => Some("bzip2"),
+        "zstd" => Some("zstd"),
         _ => None,
     }
 }
@@ -1253,7 +1357,10 @@ fn generate_embedded_code(gathered: &[GatheredFile]) -> Result<(String, String, 
     let mut seen_statics: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut unique_order: Vec<String> = Vec::new();
     let mut statics_code = String::new();
-    for f in gathered.iter().filter(|f| !f.is_dir) {
+    for f in gathered
+        .iter()
+        .filter(|f| !f.is_dir && f.external.is_none())
+    {
         if seen_statics.insert(f.storage_name.clone()) {
             unique_order.push(f.storage_name.clone());
             let ident = format!("D_{}", f.storage_name.replace('-', "_").to_uppercase());
@@ -1326,6 +1433,13 @@ fn generate_embedded_code(gathered: &[GatheredFile]) -> Result<(String, String, 
     let mut entries_code = String::new();
     for f in &root_files {
         let ph = fnv1a(&f.source_path);
+        if let Some(info) = &f.external {
+            entries_code.push_str(&format!(
+                "    EmbeddedEntry::External {{ source_path_hash: {ph}u64, file: {} }},\n",
+                external_file_literal(info)
+            ));
+            continue;
+        }
         let ident = format!("D_{}", f.storage_name.replace('-', "_").to_uppercase());
         entries_code.push_str(&format!(
             "    EmbeddedEntry::File {{ source_path_hash: {ph}u64, data: {ident}, compression: {:?} }},\n",
@@ -1641,7 +1755,7 @@ codegen-units = 1
         format!(
             r#"// Code generated by installrs; DO NOT EDIT.
 #![allow(unused_imports)]
-{subsystem_attr}use installrs::__private::{{verify_payload, DirChild, DirChildKind, EmbeddedEntry}};
+{subsystem_attr}use installrs::__private::{{verify_payload, DirChild, DirChildKind, EmbeddedEntry, ExternalFile}};
 const _: () = installrs::__private::assert_entries_version({entries_version});
 {gui_use}{statics_code}
 static ENTRIES: &[EmbeddedEntry] = &[
@@ -1690,6 +1804,7 @@ fn write_installer_sources(
     files_dir: &Path,
     uninstaller_bytes: &[u8],
     compression: &str,
+    external_data: Option<&ExternalData>,
     win_resource: Option<&WinResourceConfig>,
     gui_enabled: bool,
     target_is_windows: bool,
@@ -1702,6 +1817,13 @@ fn write_installer_sources(
     let mut features: Vec<&str> = Vec::new();
     if let Some(f) = compression_feature(compression) {
         features.push(f);
+    }
+    if gathered
+        .iter()
+        .any(|f| f.external.as_ref().is_some_and(|e| e.compression == "zstd"))
+        && !features.contains(&"zstd")
+    {
+        features.push("zstd");
     }
     if gui_enabled {
         features.push("gui");
@@ -1773,6 +1895,15 @@ codegen-units = 1
         "use installrs::gui::__private::set_window_icon_png;\n"
     };
 
+    let external_setup = match external_data {
+        Some(data) => format!(
+            "    i.set_external_data({:?}, {});\n",
+            data.file_name,
+            format_id_array(&data.id)
+        ),
+        None => String::new(),
+    };
+
     let payload_hash = compute_payload_hash(&unique_order, files_dir, Some(uninstaller_bytes))?;
     let hash_literal = format_hash_array(&payload_hash);
     let blobs_literal = format_blobs_array(&unique_order);
@@ -1780,7 +1911,7 @@ codegen-units = 1
     let main_rs = format!(
         r#"// Code generated by installrs; DO NOT EDIT.
 #![allow(unused_imports)]
-{subsystem_attr}use installrs::__private::{{verify_payload, DirChild, DirChildKind, EmbeddedEntry}};
+{subsystem_attr}use installrs::__private::{{verify_payload, DirChild, DirChildKind, EmbeddedEntry, ExternalFile}};
 const _: () = installrs::__private::assert_entries_version({entries_version});
 {gui_use}{statics_code}
 static ENTRIES: &[EmbeddedEntry] = &[
@@ -1795,7 +1926,7 @@ fn main() {{
         std::process::exit(1);
     }}
     let mut i = installrs::Installer::new(ENTRIES, UNINSTALLER_DATA, {compression:?});
-    i.install_ctrlc_handler();
+{external_setup}    i.install_ctrlc_handler();
     i.install_main({user_crate_name}::install);
 }}
 "#,
@@ -1849,6 +1980,11 @@ fn format_blobs_array(unique_storage_names: &[String]) -> String {
     out
 }
 
+fn format_id_array(id: &[u8; 16]) -> String {
+    let parts: Vec<String> = id.iter().map(|b| format!("0x{b:02x}")).collect();
+    format!("[{}]", parts.join(", "))
+}
+
 fn format_hash_array(hash: &[u8; 32]) -> String {
     let parts: Vec<String> = hash.iter().map(|b| format!("0x{b:02x}")).collect();
     format!("[{}]", parts.join(", "))
@@ -1880,6 +2016,17 @@ fn linux_icon_init(
     ))
 }
 
+fn external_file_literal(info: &ExternalInfo) -> String {
+    format!(
+        "ExternalFile {{ offset: {}, stored_size: {}, size: {}, compression: {:?}, sha256: {} }}",
+        info.offset,
+        info.stored_size,
+        info.size,
+        info.compression,
+        format_hash_array(&info.sha256)
+    )
+}
+
 /// Emit nested Rust code for DirChild entries under `parent_path`.
 fn emit_dir_children(gathered: &[GatheredFile], parent_path: &str, indent: usize) -> String {
     let pad = "    ".repeat(indent);
@@ -1901,6 +2048,11 @@ fn emit_dir_children(gathered: &[GatheredFile], parent_path: &str, indent: usize
             let children_code = emit_dir_children(gathered, &f.source_path, indent + 1);
             out.push_str(&format!(
                 "{pad}DirChild {{ name: {name:?}, kind: DirChildKind::Dir {{ children: &[\n{children_code}{pad}] }} }},\n"
+            ));
+        } else if let Some(info) = &f.external {
+            out.push_str(&format!(
+                "{pad}DirChild {{ name: {name:?}, kind: DirChildKind::External({}) }},\n",
+                external_file_literal(info)
             ));
         } else {
             let ident = format!("D_{}", f.storage_name.replace('-', "_").to_uppercase());

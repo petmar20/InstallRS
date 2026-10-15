@@ -21,6 +21,9 @@ pub trait ProgressSink: Send + Sync {
     /// Distinct from `set_status`: status is the *current* state,
     /// log is the *running history*.
     fn log(&self, message: &str);
+    /// Bytes of external files installed so far and the expected total.
+    /// Only sent by installers with `source!(..., external = true)` files.
+    fn set_bytes(&self, _done: u64, _total: u64) {}
 }
 
 /// Default text-based progress sink used by non-GUI installs. Writes
@@ -39,6 +42,8 @@ pub struct StderrProgressSink {
 struct StderrSinkState {
     last_status: String,
     last_fraction: f64,
+    /// Formatted byte progress, empty until external files are installed.
+    last_bytes: String,
     progress_line_active: bool,
 }
 
@@ -64,7 +69,11 @@ impl StderrProgressSink {
         let filled = ((state.last_fraction * bar_width as f64).round() as usize).min(bar_width);
         let bar: String = "#".repeat(filled) + &"-".repeat(bar_width - filled);
         let mut out = std::io::stderr().lock();
-        let _ = write!(out, "\r[{bar}] {pct:>3}% {}\x1b[K", state.last_status);
+        let _ = write!(
+            out,
+            "\r[{bar}] {pct:>3}% {}{}\x1b[K",
+            state.last_bytes, state.last_status
+        );
         let _ = out.flush();
         state.progress_line_active = true;
     }
@@ -118,6 +127,13 @@ impl ProgressSink for StderrProgressSink {
             self.redraw(&mut state);
         }
     }
+    fn set_bytes(&self, done: u64, total: u64) {
+        let mut state = self.state.lock().unwrap();
+        state.last_bytes = format!("{} of {} ", format_bytes(done), format_bytes(total));
+        if self.is_tty {
+            self.redraw(&mut state);
+        }
+    }
     fn log(&self, message: &str) {
         let mut state = self.state.lock().unwrap();
         self.clear_progress_line(&mut state);
@@ -125,6 +141,22 @@ impl ProgressSink for StderrProgressSink {
         if self.is_tty {
             self.redraw(&mut state);
         }
+    }
+}
+
+/// A byte count for people: "512 KB", "1.4 GB".
+pub fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["bytes", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if unit <= 1 {
+        format!("{value:.0} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 

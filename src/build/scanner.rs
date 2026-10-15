@@ -15,6 +15,8 @@ pub struct SourceRef {
     /// Feature gates. Empty = always active. Non-empty = active iff any
     /// feature in this list is in the builder's active-feature set.
     pub features: Vec<String>,
+    /// Stored in the data file next to the installer instead of inside it.
+    pub external: bool,
 }
 
 pub struct ScanResult {
@@ -94,6 +96,7 @@ fn merge_or_push(list: &mut Vec<SourceRef>, new: SourceRef) {
                 existing.ignore.push(pat);
             }
         }
+        existing.external |= new.external;
         // features: empty (unconditional) wins. Otherwise union.
         if existing.features.is_empty() || new.features.is_empty() {
             existing.features.clear();
@@ -162,6 +165,7 @@ fn parse_source_macro(mac: &syn::Macro) -> Option<SourceRef> {
         path,
         ignore: Vec::new(),
         features: Vec::new(),
+        external: false,
     };
 
     for arg in iter {
@@ -198,6 +202,16 @@ fn parse_source_macro(mac: &syn::Macro) -> Option<SourceRef> {
                         );
                     }
                 }
+                "external" => match right.as_ref() {
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Bool(b),
+                        ..
+                    }) => out.external = b.value,
+                    _ => log::warn!(
+                        "source!({:?}, external = ...): value must be true or false",
+                        out.path
+                    ),
+                },
                 _ => log::warn!(
                     "source!({:?}, {key} = ...): unknown option, ignoring",
                     out.path
