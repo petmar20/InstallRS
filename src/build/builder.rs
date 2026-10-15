@@ -1023,11 +1023,13 @@ fn gather_for_phase(
         }
         let merged = merge_ignore(&params.ignore_patterns, &src.ignore);
         if src.external {
+            // the uninstaller has no data file next to it
             if phase != "install" {
-                return Err(anyhow!(
-                    "source!({:?}, external = true) can only be used by install",
+                log::debug!(
+                    "Leaving external source {:?} out of the {phase}er",
                     src.path
-                ));
+                );
+                continue;
             }
             if data_writer.is_none() {
                 *data_writer = Some(DataWriter::create(
