@@ -12,6 +12,9 @@ breaking changes; patch bumps (`0.x.y`) will not.
 
 ## [Unreleased]
 
+- Files marked `external = true` go into a data file next to the installer instead of inside it.
+- A rebuild reuses the data file when its files are unchanged, so only the installer is built again.
+
 ## [0.1.1] — 2026-06-09
 
 - The `installrs` CLI now ships an embedded `asInvoker` Windows manifest, so
