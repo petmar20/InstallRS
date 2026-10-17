@@ -158,6 +158,9 @@ fn run_build(args: BuildArgs, verbose: u8) -> Result<()> {
         log::info!("GUI support enabled");
     }
 
+    let data_extension =
+        build::builder::read_data_extension(&target_dir, &args.features, &metadata_overrides)?;
+
     let installrs_local_path = args.installrs_path.map(|p| p.canonicalize().unwrap_or(p));
 
     let params = build::builder::BuildParams {
@@ -171,6 +174,7 @@ fn run_build(args: BuildArgs, verbose: u8) -> Result<()> {
         installer_win_resource,
         uninstaller_win_resource,
         gui_enabled,
+        data_extension,
         features: args.features,
         installrs_local_path,
     };

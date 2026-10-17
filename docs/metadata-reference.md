@@ -31,6 +31,7 @@ overridden in the `installer` / `uninstaller` subtable.
 | Key          | Type              | Default                      | Description                                                                                                                                                                       |
 | ------------ | ----------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `gui`        | bool              | `false`                      | Compile in the wizard GUI (Win32 on Windows, GTK3 on Linux). Headless still works.                                                                                                |
+| `data-extension` | string        | `"data"`                     | Extension of the data file written next to an installer that has `external = true` sources, like `"mapzo-pack"` for `setup.mapzo-pack`.                                       |
 | `icon`       | string (path)     | none                         | `.png` or `.ico` icon path, relative to the installer crate root. PNG auto-converts to multi-resolution ICO on Windows; the same PNG is embedded as the GTK window icon on Linux. |
 | `icon-sizes` | array of integers | `[16, 32, 48, 64, 128, 256]` | ICO frame sizes generated when converting from PNG. Smaller lists yield smaller binaries.                                                                                         |
 

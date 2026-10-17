@@ -211,6 +211,17 @@ impl CargoManifest {
             .unwrap_or(false)
     }
 
+    /// Read `data-extension` from `[package.metadata.installrs]`: the extension of the data file next to an
+    /// installer with external files, `data` when not set.
+    pub fn data_extension(&self, features: &[String], cli_overrides: &[(Vec<String>, toml::Value)]) -> String {
+        self.installrs_meta_merged(features, cli_overrides)
+            .as_ref()
+            .and_then(|i| i.get("data-extension"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("data")
+            .to_string()
+    }
+
     /// Parse installer and uninstaller Windows resource configs.
     ///
     /// Base keys in `[package.metadata.installrs]` apply to both. Keys in
@@ -402,6 +413,8 @@ pub struct BuildParams {
     pub installer_win_resource: Option<WinResourceConfig>,
     pub uninstaller_win_resource: Option<WinResourceConfig>,
     pub gui_enabled: bool,
+    /// Extension of the data file next to an installer with external files.
+    pub data_extension: String,
     /// User-library cargo features to enable. Gates `source!(..., features
     /// = [...])` entries and is passed through as the user-crate
     /// dependency's `features = [...]` list in the generated crates.
@@ -722,6 +735,14 @@ pub fn read_win_resource_config(
 /// Read `gui = true` from `[package.metadata.installrs]`. Parses on
 /// every call — prefer [`CargoManifest::gui_enabled`] when you already
 /// have a manifest.
+pub fn read_data_extension(
+    target_dir: &Path,
+    features: &[String],
+    cli_overrides: &[(Vec<String>, toml::Value)],
+) -> Result<String> {
+    Ok(CargoManifest::load(target_dir)?.data_extension(features, cli_overrides))
+}
+
 pub fn read_gui_config(
     target_dir: &Path,
     features: &[String],
@@ -1033,7 +1054,7 @@ fn gather_for_phase(
             }
             if data_writer.is_none() {
                 *data_writer = Some(DataWriter::create(
-                    &params.output_file.with_extension("data"),
+                    &params.output_file.with_extension(&params.data_extension),
                 )?);
             }
             let writer = data_writer.as_mut().expect("created above");
