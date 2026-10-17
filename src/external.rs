@@ -85,7 +85,9 @@ impl Installer {
         }
     }
 
-    fn add_bytes(&self, count: u64) {
+    /// Count bytes of the installer's own work, like unpacking an archive, in the
+    /// progress. Raise the total with [`Installer::set_bytes_total`] first.
+    pub fn add_bytes(&self, count: u64) {
         self.bytes.lock().unwrap().0 += count;
         self.emit_bytes();
     }
